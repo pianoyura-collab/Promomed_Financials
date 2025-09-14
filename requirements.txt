@@ -1,0 +1,14 @@
+# Core Dashboard Dependencies
+dash==2.17.1
+dash-bootstrap-components==1.6.0
+plotly>=5.22.0
+pandas>=2.2.0
+
+# Additional dependencies (if not already installed)
+numpy>=1.24.0
+werkzeug>=3.0.0
+flask>=3.0.0
+
+# Optional: For better performance
+gunicorn>=21.2.0  # For production deployment
+python-dotenv>=1.0.0  # For environment variables
