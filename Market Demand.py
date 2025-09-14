@@ -1,9 +1,11 @@
 # app.py
-# Run:
-#   pip install dash==2.17.1 dash-bootstrap-components==1.6.0 plotly>=5.22.0 pandas>=2.2.0
+# Render.com compatible version
+# Run locally:
+#   pip install dash==2.17.1 dash-bootstrap-components==1.6.0 plotly>=5.22.0 pandas>=2.2.0 gunicorn==21.2.0
 #   python app.py
 
 import io
+import os
 import re
 import math
 import pandas as pd
@@ -13,8 +15,8 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 # ========== DATA ==========
-# OPTION A: use the embedded CSV (works out of the box)
-CSV_DATA = """Category,VED,Name_ENG_Unified,Sum of Volume, RUB
+# Embedded CSV data (works without external files)
+CSV_DATA = """Category,VED,Name_ENG_Unified,Sum of Volume RUB
 Antibiotics,No,Clarithromycin,1611236661.79167
 Antibiotics,No,Doripenem,14393
 Antibiotics,No,Lincomycin,226680331.692308
@@ -64,86 +66,29 @@ Neurology,Yes,Vinpocetine,491310283.142857
 Oncology,No,Ondansetron,216962313.846154
 """
 
-# OPTION B (optional): load from a file instead.
-# Set FILE_PATH to your CSV path to override the embedded CSV (e.g., "dashboard.csv").
-FILE_PATH = "data.txt"  # Use our existing data file
-
 def load_data():
-    if FILE_PATH:
-        # The data.txt has a comma in header, so we need to handle it carefully
-        # First, let's read the raw content and fix the header
-        with open(FILE_PATH, 'r') as f:
-            content = f.read()
-
-        # Replace the problematic header
-        content = content.replace('Sum of Volume, RUB', 'Sum_of_Volume_RUB')
-
-        # Now read as CSV
-        df = pd.read_csv(io.StringIO(content))
-    else:
-        df = pd.read_csv(io.StringIO(CSV_DATA))
-
-    # Clean header names: strip spaces and BOM; lowercase for matching
+    # Use embedded CSV data
+    df = pd.read_csv(io.StringIO(CSV_DATA))
+    
+    # Clean header names
     df.columns = (
         df.columns
-        .str.replace("\ufeff", "", regex=False)  # BOM
+        .str.replace("\ufeff", "", regex=False)
         .str.strip()
     )
-
-    # Build a case-insensitive mapping for known fields
-    colmap_lower = {c.lower(): c for c in df.columns}
-
-    # Helper to fetch a column by fuzzy name
-    def find_col(*candidates_regex, prefer_numeric=False):
-        # exact (casefold) match first
-        for key, original in colmap_lower.items():
-            for pat in candidates_regex:
-                if key == pat.lower():
-                    return original
-        # regex/contains fallback
-        for key, original in colmap_lower.items():
-            for pat in candidates_regex:
-                if re.search(pat, key, flags=re.IGNORECASE):
-                    return original
-        # numeric fallback: pick the numeric column with largest total
-        if prefer_numeric:
-            numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-            if numeric_cols:
-                return max(numeric_cols, key=lambda c: pd.to_numeric(df[c], errors="coerce").fillna(0).sum())
-        return None
-
-    # Identify columns
-    col_category = find_col(r"^category$", r"category")
-    col_ved      = find_col(r"^ved$", r"ved")
-    col_drug     = find_col(r"^name_eng_unified$", r"^drug$", r"name.*unified", r"name", r"product")
-    col_volume   = find_col(r"sum_of_volume_rub", r"sum.*volume", r"volume", r"rub", prefer_numeric=True)
-
-    missing = [name for name, col in {
-        "Category": col_category,
-        "VED": col_ved,
-        "Drug": col_drug,
-        "Volume_RUB": col_volume
-    }.items() if col is None]
-
-    if missing:
-        raise ValueError(
-            "Could not find the required columns in the CSV: "
-            + ", ".join(missing)
-            + f"\nDetected columns: {list(df.columns)}"
-        )
-
-    # Rename to standard names
+    
+    # Rename columns to standard names
     df = df.rename(columns={
-        col_category: "Category",
-        col_ved: "VED",
-        col_drug: "Drug",
-        col_volume: "Volume_RUB"
+        'Category': 'Category',
+        'VED': 'VED',
+        'Name_ENG_Unified': 'Drug',
+        'Sum of Volume RUB': 'Volume_RUB'
     })
-
+    
     # Normalize types
     df["VED"] = df["VED"].astype(str).str.strip()
     df["Volume_RUB"] = pd.to_numeric(df["Volume_RUB"], errors="coerce")
-
+    
     return df
 
 df = load_data()
@@ -160,7 +105,7 @@ def format_rub(x: float) -> str:
         return "₽0"
 
 # ========== APP ==========
-# Custom CSS with your requested colors
+# Custom CSS with professional colors
 external_stylesheets = [
     dbc.themes.FLATLY,
     "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
@@ -169,12 +114,15 @@ external_stylesheets = [
 app = Dash(__name__, external_stylesheets=external_stylesheets)
 app.title = "Pharmaceutical Market Analytics"
 
+# IMPORTANT: Expose the server variable for Render.com
+server = app.server
+
 # Conservative professional color scheme
 COLORS = {
-    'primary': '#1f4e79',      # Professional navy blue
-    'secondary': '#8B4513',    # Conservative brown
-    'tertiary': '#2E5F5F',     # Teal
-    'quaternary': '#4A4A4A',   # Charcoal gray
+    'primary': '#1f4e79',
+    'secondary': '#8B4513',
+    'tertiary': '#2E5F5F',
+    'quaternary': '#4A4A4A',
     'background': '#1f4e79',
     'card_bg': 'rgba(255, 255, 255, 0.95)',
     'text_primary': '#2c3e50',
@@ -342,30 +290,30 @@ app.layout = html.Div([
     dbc.Container([
         html.H1("💊 Pharmaceutical Market Analytics", className="dashboard-title"),
         html.P("Interactive analysis of pharmaceutical sales volume by category, drug, and VED classification", className="dashboard-subtitle"),
-    dbc.Row([
-        dbc.Col(metric_card("Total Volume (RUB)", "—", "total"), md=3),
-        dbc.Col(metric_card("Avg / Drug (RUB)", "—", "avg"), md=3),
-        dbc.Col(metric_card("# Drugs", "—", "count"), md=3),
-        dbc.Col(metric_card("# Categories", "—", "cats"), md=3),
-    ], className="gy-3"),
-    dbc.Row([
-        dbc.Col(controls, md=3),
-        dbc.Col([
-            dbc.Tabs([
-                dbc.Tab(label="Top Drugs", tab_id="tab-top"),
-                dbc.Tab(label="By Category", tab_id="tab-category"),
-                dbc.Tab(label="VED Distribution", tab_id="tab-ved-pies"),
-                dbc.Tab(label="Treemap", tab_id="tab-treemap"),
-                dbc.Tab(label="Table", tab_id="tab-table"),
-            ], id="tabs", active_tab="tab-top"),
-            html.Div(id="tab-content", className="mt-3")
-        ], md=9)
-    ], className="mt-2 gy-3"),
-    html.Footer(
-        html.Small("Tip: Use the filters to narrow down to a specific therapeutic area or VED status.",
-                  style={'color': '#6c757d'}),
-        className="mt-4 text-center"
-    )
+        dbc.Row([
+            dbc.Col(metric_card("Total Volume (RUB)", "—", "total"), md=3),
+            dbc.Col(metric_card("Avg / Drug (RUB)", "—", "avg"), md=3),
+            dbc.Col(metric_card("# Drugs", "—", "count"), md=3),
+            dbc.Col(metric_card("# Categories", "—", "cats"), md=3),
+        ], className="gy-3"),
+        dbc.Row([
+            dbc.Col(controls, md=3),
+            dbc.Col([
+                dbc.Tabs([
+                    dbc.Tab(label="Top Drugs", tab_id="tab-top"),
+                    dbc.Tab(label="By Category", tab_id="tab-category"),
+                    dbc.Tab(label="VED Distribution", tab_id="tab-ved-pies"),
+                    dbc.Tab(label="Treemap", tab_id="tab-treemap"),
+                    dbc.Tab(label="Table", tab_id="tab-table"),
+                ], id="tabs", active_tab="tab-top"),
+                html.Div(id="tab-content", className="mt-3")
+            ], md=9)
+        ], className="mt-2 gy-3"),
+        html.Footer(
+            html.Small("Tip: Use the filters to narrow down to a specific therapeutic area or VED status.",
+                      style={'color': '#6c757d'}),
+            className="mt-4 text-center"
+        )
     ], fluid=True, className="main-container")
 ], style={'padding': '0', 'margin': '0'})
 
@@ -444,35 +392,30 @@ def render_tab(active_tab, cats, ved, drugs_sel):
         return dbc.Card(dbc.CardBody(dcc.Graph(figure=fig)), className="chart-card")
 
     if active_tab == "tab-ved-pies":
-        # Create pie charts for VED distribution by category
-        categories = dff['Category'].unique()
-
-        # Create subplots - adjust rows/cols based on number of categories
-
-        n_categories = len(categories)
+        categories_list = dff['Category'].unique()
+        n_categories = len(categories_list)
+        
         if n_categories == 0:
             return html.Div("No data for current filters.", className="text-muted")
 
-        # Calculate optimal grid layout
-        cols = min(3, n_categories)  # Max 3 columns
+        cols = min(3, n_categories)
         rows = math.ceil(n_categories / cols)
 
         fig = make_subplots(
             rows=rows, cols=cols,
             specs=[[{"type": "pie"} for _ in range(cols)] for _ in range(rows)],
-            subplot_titles=[f"{cat} - VED Distribution" for cat in categories]
+            subplot_titles=[f"{cat} - VED Distribution" for cat in categories_list]
         )
 
-        colors_ved = [COLORS['primary'], COLORS['secondary']]  # Navy for Yes, Brown for No
+        colors_ved = [COLORS['primary'], COLORS['secondary']]
 
-        for i, category in enumerate(categories):
+        for i, category in enumerate(categories_list):
             row = (i // cols) + 1
             col = (i % cols) + 1
 
             cat_data = dff[dff['Category'] == category]
             ved_counts = cat_data['VED'].value_counts()
 
-            # Create pie chart for this category
             labels = ['Essential (Yes)', 'Non-Essential (No)']
             values = [ved_counts.get('Yes', 0), ved_counts.get('No', 0)]
 
@@ -483,7 +426,7 @@ def render_tab(active_tab, cats, ved, drugs_sel):
                 row=row, col=col,
                 marker_colors=colors_ved,
                 textinfo='percent+label',
-                showlegend=(i == 0)  # Only show legend for first chart
+                showlegend=(i == 0)
             )
 
         fig.update_layout(
@@ -491,7 +434,7 @@ def render_tab(active_tab, cats, ved, drugs_sel):
             title_x=0.5,
             font={'family': 'Inter', 'color': COLORS['text_primary']},
             showlegend=True,
-            height=max(400, 200 * rows),  # Adjust height based on rows
+            height=max(400, 200 * rows),
             margin=dict(l=10, r=10, t=80, b=10)
         )
 
@@ -527,5 +470,14 @@ def render_tab(active_tab, cats, ved, drugs_sel):
     return dbc.Card(dbc.CardBody(table), className="chart-card")
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8052)
-    server = app.server
+    # Get port from environment variable (Render.com sets this)
+    port = int(os.environ.get("PORT", 8050))
+    
+    # Run in production mode on Render, debug mode locally
+    debug_mode = os.environ.get("RENDER") is None
+    
+    app.run_server(
+        host="0.0.0.0",  # Important for Render.com
+        port=port,
+        debug=debug_mode
+    )
