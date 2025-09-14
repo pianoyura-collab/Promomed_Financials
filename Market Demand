@@ -1,0 +1,530 @@
+# app.py
+# Run:
+#   pip install dash==2.17.1 dash-bootstrap-components==1.6.0 plotly>=5.22.0 pandas>=2.2.0
+#   python app.py
+
+import io
+import re
+import math
+import pandas as pd
+from dash import Dash, html, dcc, dash_table, Input, Output, callback
+import dash_bootstrap_components as dbc
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+# ========== DATA ==========
+# OPTION A: use the embedded CSV (works out of the box)
+CSV_DATA = """Category,VED,Name_ENG_Unified,Sum of Volume, RUB
+Antibiotics,No,Clarithromycin,1611236661.79167
+Antibiotics,No,Doripenem,14393
+Antibiotics,No,Lincomycin,226680331.692308
+Antibiotics,No,Tetracycline,511832255.090909
+Antibiotics,Yes,Azithromycin,2261189010.18182
+Antibiotics,Yes,Cefazolin,86743017.8333333
+Antibiotics,Yes,Cefoperazone + Sulbactam,21255974.4
+Antibiotics,Yes,Cefotaxime,142477482.676471
+Antibiotics,Yes,Ceftriaxone,1461147296.03333
+Antibiotics,Yes,Clamosar,2684377.09090909
+Antibiotics,Yes,Levofloxacin,1951806713.06849
+Antibiotics,Yes,Linezolid,1615084213.21739
+Antibiotics,Yes,Meropenem,648191807.565217
+Antibiotics,Yes,Moxifloxacin,286555574.296296
+Antiviral,Yes,Esperavir,1059102
+Endocrinology,No,Enligria,8106409374
+Endocrinology,No,Reduxin,11307329504.1875
+Endocrinology,No,Tirzetta,15442833.8095238
+Endocrinology,Yes,Quinsenta,11464304
+Endocrinology,Yes,Velgia,8047419.21428571
+General Therapy,No,AMBENE,486094054.090909
+General Therapy,No,Cordiamine,116548090.769231
+General Therapy,No,Dexpanthenol,1119427650.69333
+General Therapy,No,Etaria,46619680.5714286
+General Therapy,No,Meldonium,1010076558.15789
+General Therapy,No,Modelax,299229072.8
+General Therapy,No,Papaverine,481889679.482759
+General Therapy,No,Salvisar,266172839.714286
+General Therapy,No,Troxerutin,1172734124
+General Therapy,Yes,Dexketoprofen,162879193.42623
+General Therapy,Yes,Diclofenac,3419497157.14286
+General Therapy,Yes,Drotaverine,796610458.24
+General Therapy,Yes,Ibuprofen,3496615187.64198
+General Therapy,Yes,Ketoprofen,1689456851.94805
+General Therapy,Yes,Lidocaine,1636824932.19178
+General Therapy,Yes,Perindopril,2083376968.24359
+General Therapy,Yes,Sodium chloride,2057178185.45652
+General Therapy,Yes,Tranexamic acid,516873670.588235
+Immunology,No,Methyluracil,2049322931.04167
+Immunology,No,Sinaflan,292067333.793103
+Immunology,Yes,Chloropyramine,165437182.090909
+Immunology,Yes,Hydrocortisone,969770288.848485
+Neurology,No,Migrenium,113616524
+Neurology,No,Sumatriptan,510170874.705882
+Neurology,Yes,Medomexi,7628016
+Neurology,Yes,Vinpocetine,491310283.142857
+Oncology,No,Ondansetron,216962313.846154
+"""
+
+# OPTION B (optional): load from a file instead.
+# Set FILE_PATH to your CSV path to override the embedded CSV (e.g., "dashboard.csv").
+FILE_PATH = "data.txt"  # Use our existing data file
+
+def load_data():
+    if FILE_PATH:
+        # The data.txt has a comma in header, so we need to handle it carefully
+        # First, let's read the raw content and fix the header
+        with open(FILE_PATH, 'r') as f:
+            content = f.read()
+
+        # Replace the problematic header
+        content = content.replace('Sum of Volume, RUB', 'Sum_of_Volume_RUB')
+
+        # Now read as CSV
+        df = pd.read_csv(io.StringIO(content))
+    else:
+        df = pd.read_csv(io.StringIO(CSV_DATA))
+
+    # Clean header names: strip spaces and BOM; lowercase for matching
+    df.columns = (
+        df.columns
+        .str.replace("\ufeff", "", regex=False)  # BOM
+        .str.strip()
+    )
+
+    # Build a case-insensitive mapping for known fields
+    colmap_lower = {c.lower(): c for c in df.columns}
+
+    # Helper to fetch a column by fuzzy name
+    def find_col(*candidates_regex, prefer_numeric=False):
+        # exact (casefold) match first
+        for key, original in colmap_lower.items():
+            for pat in candidates_regex:
+                if key == pat.lower():
+                    return original
+        # regex/contains fallback
+        for key, original in colmap_lower.items():
+            for pat in candidates_regex:
+                if re.search(pat, key, flags=re.IGNORECASE):
+                    return original
+        # numeric fallback: pick the numeric column with largest total
+        if prefer_numeric:
+            numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            if numeric_cols:
+                return max(numeric_cols, key=lambda c: pd.to_numeric(df[c], errors="coerce").fillna(0).sum())
+        return None
+
+    # Identify columns
+    col_category = find_col(r"^category$", r"category")
+    col_ved      = find_col(r"^ved$", r"ved")
+    col_drug     = find_col(r"^name_eng_unified$", r"^drug$", r"name.*unified", r"name", r"product")
+    col_volume   = find_col(r"sum_of_volume_rub", r"sum.*volume", r"volume", r"rub", prefer_numeric=True)
+
+    missing = [name for name, col in {
+        "Category": col_category,
+        "VED": col_ved,
+        "Drug": col_drug,
+        "Volume_RUB": col_volume
+    }.items() if col is None]
+
+    if missing:
+        raise ValueError(
+            "Could not find the required columns in the CSV: "
+            + ", ".join(missing)
+            + f"\nDetected columns: {list(df.columns)}"
+        )
+
+    # Rename to standard names
+    df = df.rename(columns={
+        col_category: "Category",
+        col_ved: "VED",
+        col_drug: "Drug",
+        col_volume: "Volume_RUB"
+    })
+
+    # Normalize types
+    df["VED"] = df["VED"].astype(str).str.strip()
+    df["Volume_RUB"] = pd.to_numeric(df["Volume_RUB"], errors="coerce")
+
+    return df
+
+df = load_data()
+
+# Precompute choices
+categories = sorted(df["Category"].dropna().unique().tolist())
+drugs = sorted(df["Drug"].dropna().unique().tolist())
+ved_values = ["All", "Yes", "No"]
+
+def format_rub(x: float) -> str:
+    try:
+        return f"₽{x:,.0f}"
+    except Exception:
+        return "₽0"
+
+# ========== APP ==========
+# Custom CSS with your requested colors
+external_stylesheets = [
+    dbc.themes.FLATLY,
+    "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+]
+
+app = Dash(__name__, external_stylesheets=external_stylesheets)
+app.title = "Pharmaceutical Market Analytics"
+
+# Conservative professional color scheme
+COLORS = {
+    'primary': '#1f4e79',      # Professional navy blue
+    'secondary': '#8B4513',    # Conservative brown
+    'tertiary': '#2E5F5F',     # Teal
+    'quaternary': '#4A4A4A',   # Charcoal gray
+    'background': '#1f4e79',
+    'card_bg': 'rgba(255, 255, 255, 0.95)',
+    'text_primary': '#2c3e50',
+    'success': '#28a745',
+    'info': '#17a2b8',
+    'warning': '#fd7e14'
+}
+
+def metric_card(title, value, id_suffix):
+    return dbc.Card(
+        dbc.CardBody([
+            html.Div(title, className="metric-label"),
+            html.H3(value, id=f"metric-{id_suffix}", className="metric-value")
+        ]),
+        className="metric-card"
+    )
+
+controls = dbc.Card(
+    dbc.CardBody([
+        html.H5("Filters", className="mb-3", style={'color': '#1f4e79', 'fontWeight': '600'}),
+        dbc.Label("Category"),
+        dcc.Dropdown(
+            id="filter-category",
+            options=[{"label": c, "value": c} for c in categories],
+            value=categories,
+            multi=True,
+            placeholder="Select categories"
+        ),
+        dbc.Label("VED"),
+        dcc.RadioItems(
+            id="filter-ved",
+            options=[{"label": v, "value": v} for v in ved_values],
+            value="All",
+            inline=True,
+            inputStyle={"marginRight": "6px", "marginLeft": "12px"}
+        ),
+        dbc.Label("Drug search"),
+        dcc.Dropdown(
+            id="filter-drug",
+            options=[{"label": d, "value": d} for d in drugs],
+            value=None,
+            multi=True,
+            placeholder="Type to search drugs..."
+        ),
+        dbc.Button("Reset filters", id="reset-btn", className="mt-3", color="secondary", outline=True),
+    ]),
+    className="filter-card"
+)
+
+# Add custom CSS styling
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+            body {
+                font-family: 'Inter', sans-serif !important;
+                background: #e8e8e8;
+                min-height: 100vh;
+                margin: 0;
+                padding: 20px;
+            }
+
+            .main-container {
+                background: #ffffff;
+                border-radius: 12px;
+                padding: 30px;
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+                border: 1px solid #e1e5e9;
+            }
+
+            .dashboard-title {
+                color: #1f4e79 !important;
+                font-weight: 700 !important;
+                text-align: center;
+                text-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                margin-bottom: 10px !important;
+            }
+
+            .dashboard-subtitle {
+                color: #6c757d !important;
+                text-align: center;
+                margin-bottom: 30px !important;
+            }
+
+            .metric-card {
+                background: rgba(255, 255, 255, 0.95) !important;
+                backdrop-filter: blur(15px);
+                border-radius: 16px !important;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1) !important;
+                border: 1px solid rgba(255, 255, 255, 0.3) !important;
+                transition: all 0.3s ease;
+            }
+
+            .metric-card:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15) !important;
+            }
+
+            .metric-value {
+                font-size: 1.8rem !important;
+                font-weight: 700 !important;
+                color: #1f4e79 !important;
+                margin: 0 !important;
+            }
+
+            .metric-label {
+                color: #6b7280 !important;
+                font-size: 0.85rem !important;
+                margin-top: 4px !important;
+            }
+
+            .filter-card {
+                background: rgba(255, 255, 255, 0.1) !important;
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.2) !important;
+                border-radius: 16px !important;
+            }
+
+            .chart-card {
+                background: rgba(255, 255, 255, 0.95) !important;
+                backdrop-filter: blur(15px);
+                border-radius: 16px !important;
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1) !important;
+                border: 1px solid rgba(255, 255, 255, 0.3) !important;
+            }
+
+            .nav-tabs .nav-link {
+                color: #495057 !important;
+                border: none !important;
+                background: rgba(255, 255, 255, 0.8) !important;
+                border-radius: 10px !important;
+                margin-right: 10px !important;
+            }
+
+            .nav-tabs .nav-link.active {
+                background: #1f4e79 !important;
+                color: white !important;
+            }
+
+            .form-label {
+                color: #495057 !important;
+                font-weight: 500 !important;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
+
+app.layout = html.Div([
+    dbc.Container([
+        html.H1("💊 Pharmaceutical Market Analytics", className="dashboard-title"),
+        html.P("Interactive analysis of pharmaceutical sales volume by category, drug, and VED classification", className="dashboard-subtitle"),
+    dbc.Row([
+        dbc.Col(metric_card("Total Volume (RUB)", "—", "total"), md=3),
+        dbc.Col(metric_card("Avg / Drug (RUB)", "—", "avg"), md=3),
+        dbc.Col(metric_card("# Drugs", "—", "count"), md=3),
+        dbc.Col(metric_card("# Categories", "—", "cats"), md=3),
+    ], className="gy-3"),
+    dbc.Row([
+        dbc.Col(controls, md=3),
+        dbc.Col([
+            dbc.Tabs([
+                dbc.Tab(label="Top Drugs", tab_id="tab-top"),
+                dbc.Tab(label="By Category", tab_id="tab-category"),
+                dbc.Tab(label="VED Distribution", tab_id="tab-ved-pies"),
+                dbc.Tab(label="Treemap", tab_id="tab-treemap"),
+                dbc.Tab(label="Table", tab_id="tab-table"),
+            ], id="tabs", active_tab="tab-top"),
+            html.Div(id="tab-content", className="mt-3")
+        ], md=9)
+    ], className="mt-2 gy-3"),
+    html.Footer(
+        html.Small("Tip: Use the filters to narrow down to a specific therapeutic area or VED status.",
+                  style={'color': '#6c757d'}),
+        className="mt-4 text-center"
+    )
+    ], fluid=True, className="main-container")
+], style={'padding': '0', 'margin': '0'})
+
+# ========== CALLBACKS ==========
+
+@callback(
+    Output("filter-category", "value"),
+    Output("filter-ved", "value"),
+    Output("filter-drug", "value"),
+    Input("reset-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def reset_filters(_):
+    return categories, "All", None
+
+def apply_filters(data, cats, ved, drugs_sel):
+    dff = data.copy()
+    if cats:
+        dff = dff[dff["Category"].isin(cats)]
+    if ved in ["Yes", "No"]:
+        dff = dff[dff["VED"] == ved]
+    if drugs_sel:
+        dff = dff[dff["Drug"].isin(drugs_sel)]
+    return dff
+
+@callback(
+    Output("metric-total", "children"),
+    Output("metric-avg", "children"),
+    Output("metric-count", "children"),
+    Output("metric-cats", "children"),
+    Input("filter-category", "value"),
+    Input("filter-ved", "value"),
+    Input("filter-drug", "value"),
+)
+def update_metrics(cats, ved, drugs_sel):
+    dff = apply_filters(df, cats, ved, drugs_sel)
+    total = format_rub(dff["Volume_RUB"].sum())
+    avg = format_rub(dff.groupby("Drug")["Volume_RUB"].sum().mean() if len(dff) else 0)
+    count_drugs = len(dff["Drug"].unique())
+    count_cats = len(dff["Category"].unique())
+    return total, avg, f"{count_drugs:,}", f"{count_cats:,}"
+
+@callback(
+    Output("tab-content", "children"),
+    Input("tabs", "active_tab"),
+    Input("filter-category", "value"),
+    Input("filter-ved", "value"),
+    Input("filter-drug", "value"),
+)
+def render_tab(active_tab, cats, ved, drugs_sel):
+    dff = apply_filters(df, cats, ved, drugs_sel)
+
+    if active_tab == "tab-top":
+        top = (dff.groupby("Drug", as_index=False)["Volume_RUB"]
+               .sum()
+               .sort_values("Volume_RUB", ascending=False)
+               .head(15))
+        fig = px.bar(
+            top, x="Volume_RUB", y="Drug", orientation="h",
+            labels={"Volume_RUB": "Volume (RUB)", "Drug": ""},
+            title="Top 15 Drugs by Volume (RUB)",
+            color_discrete_sequence=[COLORS['primary']]
+        )
+        fig.update_layout(yaxis=dict(categoryorder="total ascending"), margin=dict(l=10, r=10, t=60, b=10))
+        return dbc.Card(dbc.CardBody(dcc.Graph(figure=fig)), className="chart-card")
+
+    if active_tab == "tab-category":
+        cat = dff.groupby(["Category", "VED"], as_index=False)["Volume_RUB"].sum()
+        fig = px.bar(
+            cat, x="Category", y="Volume_RUB", color="VED", barmode="group",
+            labels={"Volume_RUB": "Volume (RUB)"},
+            title="Volume by Category and VED",
+            color_discrete_map={'Yes': COLORS['primary'], 'No': COLORS['secondary']}
+        )
+        fig.update_layout(xaxis_tickangle=-20, margin=dict(l=10, r=10, t=60, b=60))
+        return dbc.Card(dbc.CardBody(dcc.Graph(figure=fig)), className="chart-card")
+
+    if active_tab == "tab-ved-pies":
+        # Create pie charts for VED distribution by category
+        categories = dff['Category'].unique()
+
+        # Create subplots - adjust rows/cols based on number of categories
+
+        n_categories = len(categories)
+        if n_categories == 0:
+            return html.Div("No data for current filters.", className="text-muted")
+
+        # Calculate optimal grid layout
+        cols = min(3, n_categories)  # Max 3 columns
+        rows = math.ceil(n_categories / cols)
+
+        fig = make_subplots(
+            rows=rows, cols=cols,
+            specs=[[{"type": "pie"} for _ in range(cols)] for _ in range(rows)],
+            subplot_titles=[f"{cat} - VED Distribution" for cat in categories]
+        )
+
+        colors_ved = [COLORS['primary'], COLORS['secondary']]  # Navy for Yes, Brown for No
+
+        for i, category in enumerate(categories):
+            row = (i // cols) + 1
+            col = (i % cols) + 1
+
+            cat_data = dff[dff['Category'] == category]
+            ved_counts = cat_data['VED'].value_counts()
+
+            # Create pie chart for this category
+            labels = ['Essential (Yes)', 'Non-Essential (No)']
+            values = [ved_counts.get('Yes', 0), ved_counts.get('No', 0)]
+
+            fig.add_pie(
+                labels=labels,
+                values=values,
+                name=f"{category}",
+                row=row, col=col,
+                marker_colors=colors_ved,
+                textinfo='percent+label',
+                showlegend=(i == 0)  # Only show legend for first chart
+            )
+
+        fig.update_layout(
+            title_text="VED Classification Distribution by Category",
+            title_x=0.5,
+            font={'family': 'Inter', 'color': COLORS['text_primary']},
+            showlegend=True,
+            height=max(400, 200 * rows),  # Adjust height based on rows
+            margin=dict(l=10, r=10, t=80, b=10)
+        )
+
+        return dbc.Card(dbc.CardBody(dcc.Graph(figure=fig)), className="chart-card")
+
+    if active_tab == "tab-treemap":
+        if len(dff) == 0:
+            return html.Div("No data for current filters.", className="text-muted")
+        tree = dff.groupby(["Category", "VED", "Drug"], as_index=False)["Volume_RUB"].sum()
+        fig = px.treemap(
+            tree, path=["Category", "VED", "Drug"], values="Volume_RUB",
+            title="Treemap: Category → VED → Drug (by Volume)",
+            color_discrete_sequence=[COLORS['primary'], COLORS['secondary'], COLORS['tertiary'], COLORS['quaternary']]
+        )
+        fig.update_traces(root_color="lightgrey")
+        fig.update_layout(margin=dict(l=10, r=10, t=60, b=10))
+        return dbc.Card(dbc.CardBody(dcc.Graph(figure=fig)), className="chart-card")
+
+    # Table (default)
+    dff_show = dff.copy()
+    dff_show["Volume_RUB"] = dff_show["Volume_RUB"].map(format_rub)
+    dff_show = dff_show[["Category", "VED", "Drug", "Volume_RUB"]].sort_values(["Category", "Drug"])
+    table = dash_table.DataTable(
+        columns=[{"name": c, "id": c} for c in dff_show.columns],
+        data=dff_show.to_dict("records"),
+        page_size=12,
+        sort_action="native",
+        filter_action="native",
+        style_table={"overflowX": "auto"},
+        style_cell={"padding": "10px"},
+        style_header={"fontWeight": "bold"},
+    )
+    return dbc.Card(dbc.CardBody(table), className="chart-card")
+
+if __name__ == "__main__":
+    app.run(debug=True, port=8052)
