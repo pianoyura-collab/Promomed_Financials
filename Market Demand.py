@@ -528,3 +528,4 @@ def render_tab(active_tab, cats, ved, drugs_sel):
 
 if __name__ == "__main__":
     app.run(debug=True, port=8052)
+    server = app.server
